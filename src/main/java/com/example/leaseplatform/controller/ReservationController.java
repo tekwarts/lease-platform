@@ -20,23 +20,29 @@ public class ReservationController {
     }
 
     @GetMapping("/properties")
-    List<PropertyView> properties(Principal principal) { return inventory.properties(principal.getName()); }
+    List<PropertyView> properties(Principal principal) {
+        return inventory.properties(principal.getName());
+    }
 
     @GetMapping("/properties/{id}")
-    PropertyView property(Principal principal, @PathVariable UUID id) { return inventory.property(principal.getName(), id); }
+    PropertyView property(Principal principal, @PathVariable UUID id) {
+        return inventory.property(principal.getName(), id);
+    }
 
     @GetMapping("/leases/{id}")
-    LeaseView lease(Principal principal, @PathVariable UUID id) { return inventory.lease(principal.getName(), id); }
+    LeaseView lease(Principal principal, @PathVariable UUID id) {
+        return inventory.lease(principal.getName(), id);
+    }
 
     @PostMapping("/properties/{id}/leases")
     ResponseEntity<String> reserve(Principal principal, @PathVariable UUID id,
-                                  @RequestHeader("Idempotency-Key") UUID key) {
+            @RequestHeader("Idempotency-Key") UUID key) {
         return response(reservations.reserve(principal.getName(), id, key));
     }
 
     @PostMapping("/leases/{id}/cancel")
     ResponseEntity<String> cancel(Principal principal, @PathVariable UUID id,
-                                 @RequestHeader("Idempotency-Key") UUID key) {
+            @RequestHeader("Idempotency-Key") UUID key) {
         return response(reservations.cancel(principal.getName(), id, key));
     }
 

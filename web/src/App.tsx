@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, get, message, post, startSession } from './api';
 import type { Lease, Property, Run } from './api';
+import { DatabaseState, type CommittedAction } from './DatabaseState';
 
 type Page = 'properties' | 'lab';
 type History = { reserve?: { key: string; settled: boolean }; cancel?: { key: string; leaseId: string; settled: boolean } };
@@ -13,17 +14,25 @@ function Pill({ children, tone = 'green' }: { children: ReactNode; tone?: string
 }
 
 export function App() {
+  const client = useQueryClient();
   const [page, setPage] = useState<Page>('properties');
+  const [lastAction, setLastAction] = useState<CommittedAction>();
   const session = useQuery({ queryKey: ['session'], queryFn: startSession, staleTime: Infinity });
   const inventory = useQuery({
     queryKey: ['properties', session.data?.id],
     queryFn: ({ signal }) => get<Property[]>('/properties', signal),
     enabled: Boolean(session.data), refetchInterval: 2500,
   });
-  const properties = inventory.data ?? [];
+  const properties = [...(inventory.data ?? [])].sort((a, b) => a.displayName.localeCompare(b.displayName) || a.id.localeCompare(b.id));
   const connected = session.isSuccess && inventory.isSuccess && !inventory.isError;
   const error = session.error ?? inventory.error;
-  const refresh = () => { if (session.isError) void session.refetch(); else void inventory.refetch(); };
+  const refresh = () => {
+    if (session.isError) void session.refetch();
+    else {
+      void inventory.refetch();
+      void client.invalidateQueries({ queryKey: ['lease'] });
+    }
+  };
 
   return <div className="shell">
     <aside className="sidebar">
@@ -54,7 +63,8 @@ export function App() {
             <Stat label="ACTIVE HOLDS" value={inventory.data ? properties.filter(p => p.status === 'RESERVED').length : '—'} hint="15-minute reservation window" />
           </section>
           <div className="section-heading"><div><h2>Your inventory <span className="count">{properties.length}</span></h2><p>Reserve a space, retry the same request, or release your hold.</p></div><Pill tone="neutral">{session.data?.redisEnabled ? 'Redis admission + PostgreSQL' : 'PostgreSQL mode'}</Pill></div>
-          {properties.length ? <section className="property-grid" aria-label="Properties">{properties.map((property, index) => <PropertyCard key={property.id} property={property} index={index} owner={session.data!.id} />)}</section> : <div className="empty-inventory"><span aria-hidden="true">▥</span><h3>Your test inventory will appear here</h3><p>Once connected, the server creates three private properties for your session.</p></div>}
+          {properties.length ? <section className="property-grid" aria-label="Properties">{properties.map((property, index) => <PropertyCard key={property.id} property={property} index={index} owner={session.data!.id} onCommit={setLastAction} />)}</section> : <div className="empty-inventory"><span aria-hidden="true">▥</span><h3>Your test inventory will appear here</h3><p>Once connected, the server creates three private properties for your session.</p></div>}
+          <DatabaseState properties={properties} updatedAt={inventory.dataUpdatedAt} fetching={inventory.isFetching} error={error} lastAction={lastAction} />
           <section className="lab-banner"><span className="lab-symbol" aria-hidden="true">⌁</span><div><span className="tiny-label">BUILT TO HANDLE CONTENTION</span><h2>What happens when everyone clicks Reserve?</h2><p>Send up to 1,000 attempts through the same reservation service.</p></div><button className="button dark" onClick={() => setPage('lab')}>Open concurrency lab <Arrow /></button></section>
           <div className="explanation-grid"><div><span>01</span><h3>Reserve</h3><p>A single database transaction creates your lease and claims the property.</p></div><div><span>02</span><h3>Replay safely</h3><p>The same idempotency key returns the original successful response.</p></div><div><span>03</span><h3>Release or expire</h3><p>Cancel your hold, or let the server release it after 15 minutes.</p></div></div>
         </> : <Lab connected={connected} defaultRedis={session.data?.redisEnabled ?? false} />}
@@ -75,7 +85,7 @@ function readHistory(id: string): History {
   } catch { return {}; }
 }
 
-function PropertyCard({ property, index, owner }: { property: Property; index: number; owner: string }) {
+function PropertyCard({ property, index, owner, onCommit }: { property: Property; index: number; owner: string; onCommit: (action: CommittedAction) => void }) {
   const client = useQueryClient();
   const [history, setHistory] = useState<History>(() => readHistory(property.id));
   const [notice, setNotice] = useState('');
@@ -94,9 +104,12 @@ function PropertyCard({ property, index, owner }: { property: Property; index: n
     onSuccess: (response, request) => {
       remember({ ...history, [request.kind]: { key: request.key, leaseId: request.leaseId, settled: true } });
       setReceipt(response.data);
+      onCommit({ propertyId: property.id, leaseId: response.data.id, kind: request.kind, replayed: response.replayed, receivedAt: Date.now() });
       setNotice(response.replayed ? 'Original response replayed. Current availability is shown above.' : request.kind === 'reserve' ? 'Reservation committed. This property is now held for you.' : 'Hold released. The property can be reserved again.');
-      void client.invalidateQueries({ queryKey: ['properties', owner] });
-      void client.invalidateQueries({ queryKey: ['lease'] });
+      return Promise.all([
+        client.invalidateQueries({ queryKey: ['properties', owner] }),
+        client.invalidateQueries({ queryKey: ['lease'] }),
+      ]);
     },
     onError: (error, request) => {
       if (error instanceof ApiError && [400, 401, 403, 404, 409, 422].includes(error.status)) {
@@ -146,7 +159,11 @@ function Countdown({ deadline }: { deadline: string }) {
 function Lab({ connected, defaultRedis }: { connected: boolean; defaultRedis: boolean }) {
   const [attempts, setAttempts] = useState(100);
   const [redis, setRedis] = useState(defaultRedis);
-  const run = useMutation({ mutationFn: () => post<Run>('/demo/runs', { attempts, redisEnabled: redis }) });
+  const [completedAt, setCompletedAt] = useState(0);
+  const run = useMutation({
+    mutationFn: () => post<Run>('/demo/runs', { attempts, redisEnabled: redis }),
+    onSuccess: () => setCompletedAt(Date.now()),
+  });
   const result = run.data?.data;
   return <>
     <section className="lab-layout">
@@ -169,6 +186,7 @@ function Lab({ connected, defaultRedis }: { connected: boolean; defaultRedis: bo
         </>}
       </div>
     </section>
+    <DatabaseState properties={result ? [result.property] : []} updatedAt={result ? completedAt : 0} fetching={run.isPending} error={null} snapshot={{ runId: result?.id, lease: result?.activeLease ?? null, running: run.isPending }} />
     <section className="lab-how"><span className="tiny-label">WHAT THIS TEST PROVES</span><h2>Correctness lives in PostgreSQL.</h2><p>Redis can reduce contention, but the database transaction, version checks, and unique index protect inventory in either mode. Switch Redis off and run again to compare real outcomes.</p><p className="muted">A successful test requires exactly one successful reservation, one active lease, matching property ownership, and zero unexpected errors. Results are scoped to this run.</p></section>
   </>;
 }

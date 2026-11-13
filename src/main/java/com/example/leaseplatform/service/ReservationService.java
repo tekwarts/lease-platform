@@ -19,7 +19,10 @@ import java.util.HexFormat;
 import java.util.UUID;
 import java.util.function.Supplier;
 
-/** Admission is outside the transaction; commit finishes BEFORE the Redis token is released. */
+/**
+ * Admission is outside the transaction; commit finishes BEFORE the Redis token
+ * is released.
+ */
 @Service
 public class ReservationService {
     private final PropertyRepository properties;
@@ -51,11 +54,13 @@ public class ReservationService {
         return reserve(owner, owner, propertyId, key, settings.redisEnabled());
     }
 
-    // Used only by the bounded, server-controlled lab; HTTP clients cannot choose a tenant ID.
+    // Used only by the bounded, server-controlled lab; HTTP clients cannot choose a
+    // tenant ID.
     StoredResponse reserve(String inventoryOwner, String tenant, UUID propertyId, UUID key, boolean redisEnabled) {
         String hash = hash("RESERVE:" + propertyId);
         StoredResponse previous = replay(tenant, "RESERVE", key, hash);
-        if (previous != null) return previous;
+        if (previous != null)
+            return previous;
         try (AdmissionLock.Ticket ignored = admission.acquire(propertyId, redisEnabled)) {
             return mutate(tenant, "RESERVE", key, hash, () -> {
                 Property property = properties.findByIdAndDemoOwnerId(propertyId, inventoryOwner)
@@ -76,9 +81,11 @@ public class ReservationService {
                 return new StoredResponse(201, json.writeValueAsString(LeaseView.of(lease)), false);
             });
         } catch (ApiException error) {
-            // An identical request may have committed while this caller waited for admission.
+            // An identical request may have committed while this caller waited for
+            // admission.
             StoredResponse committed = replay(tenant, "RESERVE", key, hash);
-            if (committed != null) return committed;
+            if (committed != null)
+                return committed;
             throw error;
         }
     }
@@ -100,30 +107,38 @@ public class ReservationService {
         });
     }
 
-    private StoredResponse mutate(String tenant, String operation, UUID key, String hash, Supplier<StoredResponse> change) {
+    private StoredResponse mutate(String tenant, String operation, UUID key, String hash,
+            Supplier<StoredResponse> change) {
         StoredResponse previous = replay(tenant, operation, key, hash);
-        if (previous != null) return previous;
+        if (previous != null)
+            return previous;
         try {
             return transactions.execute(tx -> {
                 StoredResponse inside = replay(tenant, operation, key, hash);
-                if (inside != null) return inside;
+                if (inside != null)
+                    return inside;
                 StoredResponse response = change.get();
                 idempotency.saveAndFlush(new IdempotencyRequest(tenant, operation, key, hash,
                         response.status(), response.body(), clock.now()));
                 return response;
             });
         } catch (DataIntegrityViolationException | ObjectOptimisticLockingFailureException | DomainConflict error) {
-            // The failed transaction has already rolled back; this read uses a fresh transaction.
+            // The failed transaction has already rolled back; this read uses a fresh
+            // transaction.
             StoredResponse committed = replay(tenant, operation, key, hash);
-            if (committed != null) return committed;
+            if (committed != null)
+                return committed;
             if (error instanceof ObjectOptimisticLockingFailureException) {
-                throw new ApiException(409, "OPTIMISTIC_CONFLICT", "Inventory changed concurrently. Refresh and retry.");
+                throw new ApiException(409, "OPTIMISTIC_CONFLICT",
+                        "Inventory changed concurrently. Refresh and retry.");
             }
             if (error instanceof DataIntegrityViolationException) {
-                if (!constraint(error, "uq_lease_one_active_per_property") && !constraint(error, "uq_idempotency_identity")) {
+                if (!constraint(error, "uq_lease_one_active_per_property")
+                        && !constraint(error, "uq_idempotency_identity")) {
                     throw error; // An unrelated schema/programming error is not a business rejection.
                 }
-                throw new ApiException(409, "DATABASE_CONFLICT", "Another reservation committed first. Refresh availability.");
+                throw new ApiException(409, "DATABASE_CONFLICT",
+                        "Another reservation committed first. Refresh availability.");
             }
             throw new ApiException(409, "PROPERTY_UNAVAILABLE", error.getMessage());
         }
@@ -132,26 +147,30 @@ public class ReservationService {
     private StoredResponse replay(String user, String operation, UUID key, String hash) {
         return idempotency.findByUserIdAndOperationAndIdempotencyKey(user, operation, key).map(record -> {
             if (!record.matchesRequest(hash)) {
-                throw new ApiException(422, "IDEMPOTENCY_MISMATCH", "This key was already used for a different request.");
+                throw new ApiException(422, "IDEMPOTENCY_MISMATCH",
+                        "This key was already used for a different request.");
             }
             return new StoredResponse(record.getResponseStatus(), record.getResponseBody(), true);
         }).orElse(null);
     }
 
     void emit(UUID propertyId, UUID leaseId, String type, Lease lease, Instant now) {
-        outbox.save(new OutboxEvent(propertyId, leaseId, null, type, json.writeValueAsString(LeaseView.of(lease)), now));
+        outbox.save(
+                new OutboxEvent(propertyId, leaseId, null, type, json.writeValueAsString(LeaseView.of(lease)), now));
     }
 
     private static boolean constraint(Throwable error, String name) {
         for (Throwable cause = error; cause != null; cause = cause.getCause()) {
-            if (cause.getMessage() != null && cause.getMessage().contains(name)) return true;
+            if (cause.getMessage() != null && cause.getMessage().contains(name))
+                return true;
         }
         return false;
     }
 
     private static String hash(String identity) {
         try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(identity.getBytes(StandardCharsets.UTF_8)));
+            return HexFormat.of()
+                    .formatHex(MessageDigest.getInstance("SHA-256").digest(identity.getBytes(StandardCharsets.UTF_8)));
         } catch (NoSuchAlgorithmException error) {
             throw new IllegalStateException("SHA-256 is required by the Java runtime", error);
         }
